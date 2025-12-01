@@ -1,0 +1,14 @@
+[package]
+name = "zarr-vortex"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bytes = { version = "1" }
+env_logger = { version = "0.11" }
+inventory = { version = "0.3" }
+log = { version = "0.4" }
+tracing = { version = "0.1" }
+tokio = { version = "1" }
+vortex = { version = "0.56.0", features = ["tokio"] }
+zarrs = { version = "0.22.10", features = ["async"] }

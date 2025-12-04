@@ -7,6 +7,7 @@ use vortex::{
     VortexSessionDefault as _,
     arrays::PrimitiveArray,
     buffer::{Alignment, Buffer, ByteBuffer},
+    compute::min_max,
     dtype::{DType, NativePType, Nullability, PType, match_each_native_ptype},
     file::{OpenOptionsSessionExt as _, WriteOptionsSessionExt},
     io::session::RuntimeSessionExt as _,
@@ -19,28 +20,34 @@ use zarrs::{
         ArrayBytes, ArrayCodecTraits, BytesRepresentation, ChunkRepresentation, DataType, RawBytes,
         RecommendedConcurrency,
         codec::{
-            ArrayToBytesCodecTraits, AsyncArrayPartialDecoderTraits,
-            AsyncArrayPartialEncoderTraits, AsyncBytesPartialDecoderTraits,
-            AsyncBytesPartialEncoderTraits, Codec, CodecError, CodecMetadataOptions, CodecOptions,
-            CodecPlugin, CodecTraits, PartialDecoderCapability, PartialEncoderCapability,
+            ArrayPartialDecoderTraits, ArrayPartialEncoderTraits, ArrayToBytesCodecTraits,
+            AsyncArrayPartialDecoderTraits, AsyncArrayPartialEncoderTraits,
+            AsyncBytesPartialDecoderTraits, AsyncBytesPartialEncoderTraits,
+            BytesPartialDecoderTraits, BytesPartialEncoderTraits, Codec, CodecError,
+            CodecMetadataOptions, CodecOptions, CodecPlugin, CodecTraits, PartialDecoderCapability,
+            PartialEncoderCapability,
         },
     },
     metadata::{Configuration, v3::MetadataV3},
     plugin::PluginCreateError,
 };
 
+use crate::partial_decoder::PartialCodec;
+
 mod async_partial_decoder;
 mod async_partial_encoder;
+mod partial_decoder;
+// mod partial_encoder;
 
-pub const VORTEX_IDENTIFIER: &'static str = "vortex";
-
-#[derive(Debug)]
-struct VortexCodec {
-    session: VortexSession,
-}
+pub const VORTEX_IDENTIFIER: &str = "vortex";
 
 inventory::submit! {
     CodecPlugin::new(VORTEX_IDENTIFIER, |x| x == VORTEX_IDENTIFIER, vortex_codec)
+}
+
+#[derive(Debug)]
+pub struct VortexCodec {
+    pub session: VortexSession,
 }
 
 pub fn vortex_codec(_metadata: &MetadataV3) -> Result<Codec, PluginCreateError> {
@@ -88,6 +95,7 @@ impl ArrayCodecTraits for VortexCodec {
     }
 }
 
+#[async_trait::async_trait]
 impl ArrayToBytesCodecTraits for VortexCodec {
     fn into_dyn(self: std::sync::Arc<Self>) -> std::sync::Arc<dyn ArrayToBytesCodecTraits> {
         self
@@ -161,20 +169,56 @@ impl ArrayToBytesCodecTraits for VortexCodec {
         )))
     }
 
-    async fn async_partial_decoder(
+    fn partial_decoder(
         self: Arc<Self>,
-        input_handle: Arc<dyn AsyncBytesPartialDecoderTraits>,
+        input_handle: Arc<dyn BytesPartialDecoderTraits>,
         decoded_representation: &ChunkRepresentation,
         options: &CodecOptions,
+    ) -> Result<Arc<dyn ArrayPartialDecoderTraits>, CodecError> {
+        Ok(Arc::new(PartialCodec {
+            session: self.session.clone(),
+            input_handle,
+            options: options.clone(),
+            chunk_shape: decoded_representation
+                .shape()
+                .iter()
+                .cloned()
+                .map(u64::from)
+                .collect(),
+            data_type: decoded_representation.data_type().clone(),
+        }))
+    }
+
+    /// Initialise a partial encoder.
+    ///
+    /// The default implementation reencodes the entire chunk.
+    ///
+    /// # Errors
+    /// Returns a [`CodecError`] if initialisation fails.
+    #[allow(unused_variables)]
+    fn partial_encoder(
+        self: Arc<Self>,
+        _input_output_handle: Arc<dyn BytesPartialEncoderTraits>,
+        _decoded_representation: &ChunkRepresentation,
+        _options: &CodecOptions,
+    ) -> Result<Arc<dyn ArrayPartialEncoderTraits>, CodecError> {
+        todo!()
+    }
+
+    async fn async_partial_decoder(
+        self: Arc<Self>,
+        _input_handle: Arc<dyn AsyncBytesPartialDecoderTraits>,
+        _decoded_representation: &ChunkRepresentation,
+        _options: &CodecOptions,
     ) -> Result<Arc<dyn AsyncArrayPartialDecoderTraits>, CodecError> {
         todo!()
     }
 
     async fn async_partial_encoder(
         self: Arc<Self>,
-        input_output_handle: Arc<dyn AsyncBytesPartialEncoderTraits>,
-        decoded_representation: &ChunkRepresentation,
-        options: &CodecOptions,
+        _input_output_handle: Arc<dyn AsyncBytesPartialEncoderTraits>,
+        _decoded_representation: &ChunkRepresentation,
+        _options: &CodecOptions,
     ) -> Result<Arc<dyn AsyncArrayPartialEncoderTraits>, CodecError> {
         todo!()
     }
@@ -196,6 +240,10 @@ impl VortexCodec {
         let vortex_bytes = Buffer::<T>::from_bytes_aligned(owned, alignment);
         // TODO(DK): Can we get invalidity information from Zarr?
         let vortex_array = PrimitiveArray::new(vortex_bytes, Validity::AllValid);
+
+        let x = min_max(&vortex_array.to_array()).unwrap().unwrap();
+        info!(min = %x.min, max = %x.max);
+
         let mut out = Vec::<u8>::new();
         let summary = self
             .session
@@ -203,7 +251,7 @@ impl VortexCodec {
             .write(&mut out, vortex_array.to_array_stream())
             .await
             .map_err(|err| CodecError::Other(format!("vortex error: {err}")))?;
-        info!(layout = %summary.footer().layout().display_tree());
+        info!(layout = %summary.footer().layout().display_tree_verbose(true));
         Ok(RawBytes::Owned(out))
     }
 }
@@ -278,15 +326,14 @@ mod tests {
     };
     use zarrs::{
         array::{Array, ArrayBuilder, DataType},
+        array_subset::ArraySubset,
         storage::store::MemoryStore,
     };
 
     use crate::VortexCodec;
 
     #[test]
-    fn test() {
-        env_logger::init();
-
+    fn test_chunk() {
         let store = Arc::new(MemoryStore::default());
         let array = ArrayBuilder::new(
             vec![400, 600], // array shape
@@ -297,7 +344,7 @@ mod tests {
         .array_to_bytes_codec(Arc::new(VortexCodec {
             session: VortexSession::default().with_tokio(),
         }))
-        .dimension_names(["y", "x"].into())
+        .dimension_names(["r", "c"].into())
         .build(store.clone(), "/array")
         .unwrap();
         array.store_metadata().unwrap();
@@ -309,5 +356,51 @@ mod tests {
         let array = Array::open(store.clone(), "/array").unwrap();
         let chunk = array.retrieve_chunk_elements::<f32>(&[0, 0]).unwrap();
         assert_eq!(chunk, data);
+    }
+
+    #[test]
+    fn test_partial() {
+        let store = Arc::new(MemoryStore::default());
+        let array = ArrayBuilder::new(
+            vec![4000, 6000], // array shape
+            vec![2000, 3000], // regular chunk shape
+            DataType::Float32,
+            f32::NAN,
+        )
+        .array_to_bytes_codec(Arc::new(VortexCodec {
+            session: VortexSession::default().with_tokio(),
+        }))
+        .dimension_names(["r", "c"].into())
+        .build(store.clone(), "/array")
+        .unwrap();
+        array.store_metadata().unwrap();
+        let data = (0..(2000 * 3000))
+            .map(|x| (x % 10) as f32 / 10.0f32)
+            .collect::<Vec<f32>>();
+        array.store_chunk_elements(&[0, 0], &data).unwrap();
+
+        let array = Array::open(store.clone(), "/array").unwrap();
+        let chunk = array.retrieve_chunk_elements::<f32>(&[0, 0]).unwrap();
+        assert_eq!(chunk, data);
+
+        let array = Array::open(store.clone(), "/array").unwrap();
+        let chunk = array
+            .retrieve_array_subset_elements::<f32>(&ArraySubset::new_with_ranges(&[10..20, 10..20]))
+            .unwrap();
+        assert_eq!(
+            chunk,
+            vec![
+                0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, //
+                0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, //
+                0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, //
+                0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, //
+                0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, //
+                0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, //
+                0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, //
+                0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, //
+                0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, //
+                0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9
+            ]
+        );
     }
 }

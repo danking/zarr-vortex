@@ -10,7 +10,8 @@ futures = { version = "0.3" }
 itertools = { version = "0.14" }
 inventory = { version = "0.3" }
 log = { version = "0.4" }
-pyo3 = { version = "0.26.0", features = ["abi3", "abi3-py311"] }
+pyo3 = { version = "0.26.0", features = ["abi3", "abi3-py311", "experimental-async"] }
+pyo3-async-runtimes = { version = "0.26", features = ["tokio-runtime"] }
 tracing = { version = "0.1" }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tokio = { version = "1" }
@@ -18,6 +19,11 @@ async-trait = { version = "0.1" }
 # vortex = { version = "0.56.0", features = ["tokio"] }
 vortex = { path = "../vortex/vortex", features = ["tokio"] }
 zarrs = { version = "0.22.10", features = ["async"] }
+numpy = { version = "0.26.0" }
+
+[lib]
+name = "zarr_vortex"
+crate-type = ["cdylib"]
 
 [dev-dependencies]
 divan = { version = "0.1" }

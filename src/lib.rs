@@ -1,6 +1,10 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
+use pyo3::{
+    Bound, PyResult, Python, pymodule,
+    types::{PyModule, PyModuleMethods as _},
+};
 use tokio::runtime::Builder;
 use tracing::info;
 use vortex::{
@@ -32,11 +36,12 @@ use zarrs::{
     plugin::PluginCreateError,
 };
 
-use crate::partial_decoder::PartialCodec;
+use crate::{partial_decoder::PartialCodec, python::PyVortexCodec};
 
 mod async_partial_decoder;
 mod async_partial_encoder;
 mod partial_decoder;
+mod python;
 // mod partial_encoder;
 
 pub const VORTEX_IDENTIFIER: &str = "vortex";
@@ -315,6 +320,12 @@ fn zarr_data_type_to_dtype(zarr: &DataType) -> DType {
         DataType::Extension(_data_type_extension) => todo!(),
         _ => todo!(),
     }
+}
+
+#[pymodule]
+fn _lib(_py: Python, m: &Bound<PyModule>) -> PyResult<()> {
+    m.add_class::<PyVortexCodec>()?;
+    Ok(())
 }
 
 #[cfg(test)]

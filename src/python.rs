@@ -257,7 +257,10 @@ impl PyVortexCodec {
         })?;
         // SAFETY: ReadOnlyCell is transparent, UnsafeCell has the same memory
         // layout. If Python mutates this concurrently, we're dead.
-        let slice: &[u8] = unsafe { std::mem::transmute(slice) };
+        let slice: &[T] = unsafe { std::mem::transmute(slice) };
+        let slice: &[u8] = unsafe {
+            std::slice::from_raw_parts(slice.as_ptr() as *const u8, std::mem::size_of_val(slice))
+        };
         let vortex_bytes = Buffer::<T>::from_byte_buffer(Buffer::from(Bytes::from_owner(slice)));
         // TODO(DK): Can we get invalidity information from Zarr?
         let vortex_array = PrimitiveArray::new(vortex_bytes, Validity::AllValid);

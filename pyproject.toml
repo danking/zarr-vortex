@@ -1,0 +1,54 @@
+[build-system]
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "zarr_vortex"
+description = "A CodecPipeline for zarr-python backed by zarr-vortex"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+]
+license = "MIT"
+classifiers = [
+]
+dynamic = ["version"]
+dependencies = [
+    "numpy>=1.24",
+    "vortex-data>=0.56.0",
+    "zarr>=3.1",
+]
+
+[dependency-groups]
+test = [
+    "aiohttp",
+    "fsspec>2024",
+    "numcodecs>=0.16.1",
+    "pytest",
+    "pytest-asyncio",
+    "pytest-xdist",
+    "pytest-mock",
+]
+# doc = ["sphinx>=7.4.6", "myst-parser"]
+dev = [
+    "maturin",
+    "pip",
+    "basedpyright",
+    "ipython>=9.8.0",
+    {include-group = "test"},
+    # {include-group = "doc"},
+]
+
+[project.entry-points."zarr.codecs"]
+"zarr_vortex.codec" = "zarr_vortex:Codec"
+
+[tool.maturin]
+python-source = "python"
+module-name = "zarr_vortex._lib"
+features = [
+    "pyo3/extension-module",
+    "pyo3/experimental-async",
+]
+include = [
+    "python/zarr_vortex/py.typed",
+]

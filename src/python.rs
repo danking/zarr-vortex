@@ -4,7 +4,7 @@ use bytes::Bytes;
 use futures::{TryFutureExt, future::BoxFuture};
 use numpy::PyArray;
 use pyo3::{
-    buffer::{Element, PyBuffer, ReadOnlyCell},
+    buffer::{Element, PyBuffer},
     exceptions::PyValueError,
     prelude::*,
 };

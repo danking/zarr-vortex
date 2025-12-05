@@ -38,11 +38,8 @@ use zarrs::{
 
 use crate::{partial_decoder::PartialCodec, python::PyVortexCodec};
 
-mod async_partial_decoder;
-mod async_partial_encoder;
 mod partial_decoder;
 mod python;
-// mod partial_encoder;
 
 pub const VORTEX_IDENTIFIER: &str = "vortex";
 

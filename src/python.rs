@@ -1,8 +1,7 @@
 use std::sync::Arc;
 
-use bytes::Bytes;
-use futures::future::BoxFuture;
-use numpy::{PyArray, PyArray1, PyReadonlyArray1};
+use futures::{TryFutureExt, future::BoxFuture};
+use numpy::PyArray;
 use pyo3::{
     buffer::{Element, PyBuffer},
     exceptions::PyValueError,
@@ -17,7 +16,7 @@ use vortex::{
     buffer::{Buffer, ByteBuffer},
     compute::min_max,
     dtype::{DType, NativePType, Nullability, PType, half},
-    error::VortexResult,
+    error::{VortexError, VortexResult},
     file::{OpenOptionsSessionExt as _, WriteOptionsSessionExt as _},
     io::{VortexReadAt, session::RuntimeSessionExt as _},
     session::VortexSession,
@@ -190,7 +189,7 @@ impl PyVortexCodec {
     }
 
     fn encode(&self, py: Python, dtype: u64, view: Bound<PyAny>) -> PyResult<Vec<u8>> {
-        let dtype = unjank_it(dtype);
+        let dtype = decode_vortex_dtype(dtype);
 
         if let DType::Bool(..) = dtype {
             todo!()
@@ -249,14 +248,14 @@ impl PyVortexCodec {
         py: Python<'_>,
         bytes: PyBuffer<T>,
     ) -> PyResult<Vec<u8>> {
+        let slice = bytes.as_slice(py).ok_or_else(|| {
+            PyValueError::new_err(format!(
+                "Buffer must be c-contiguous and contain values of type {}.",
+                T::PTYPE
+            ))
+        })?;
         // FIXME(DK): surely a way to borrow the bytes from Python
-        let vortex_bytes = Buffer::from_iter(
-            bytes
-                .as_slice(py)
-                .expect("shut the fuck up")
-                .iter()
-                .map(|x| x.get()),
-        );
+        let vortex_bytes = Buffer::from_iter(slice.iter().map(|x| x.get()));
         // TODO(DK): Can we get invalidity information from Zarr?
         let vortex_array = PrimitiveArray::new(vortex_bytes, Validity::AllValid);
 
@@ -275,7 +274,8 @@ impl PyVortexCodec {
     }
 }
 
-fn jank_it(dtype: DType) -> u64 {
+#[allow(unused)]
+fn encode_vortex_dtype(dtype: DType) -> u64 {
     match dtype {
         DType::Bool(..) => 0,
         DType::Primitive(PType::U8, ..) => 1,
@@ -293,7 +293,7 @@ fn jank_it(dtype: DType) -> u64 {
     }
 }
 
-fn unjank_it(dtype: u64) -> DType {
+fn decode_vortex_dtype(dtype: u64) -> DType {
     match dtype {
         0 => DType::Bool(Nullability::Nullable),
         1 => DType::Primitive(PType::U8, Nullability::Nullable),
@@ -325,40 +325,43 @@ impl VortexReadAt for JankVortexReadAt {
     ) -> BoxFuture<'static, VortexResult<ByteBuffer>> {
         let reader = self.reader.clone();
         // FIXME(DK): alignment obviously
-        Box::pin(async move {
-            let fut = Python::attach(|py| {
-                let awaitable = reader
-                    .call1(py, (offset, offset + length as u64))
-                    .expect("ugh wtf")
-                    .into_bound(py);
-                into_future(awaitable)
-            })
-            .expect("wat");
-            let buf = fut.await.expect("ugh 2");
+        Box::pin(
+            async move {
+                let buf = Python::attach(|py| {
+                    let awaitable = reader.call1(py, (offset, offset + length as u64))?;
+                    into_future(awaitable.into_bound(py))
+                })?
+                .await?;
 
-            let vortex_bytes = Python::attach(|py| {
-                // SAFETY: the ndarray is held long enough in Python until the chunk is fully read.
-                let buffer = unsafe { buf.downcast_bound::<PyArray1<u8>>(py). };
-                let arr =
-                    PyReadonlyArray1::<u8>::extract_bound(buf.bind(py)).expect("its an array");
-                Buffer::from(Bytes::from_owner(arr.as_slice().expect("contiguous")))
-            });
+                let vortex_bytes = Python::attach(|py| {
+                    let buf = PyBuffer::<u8>::get(buf.bind(py))?;
+                    let slice = buf.as_slice(py).ok_or_else(|| {
+                        PyValueError::new_err("ByteGetter must return a c-contiguous byte buffer")
+                    })?;
 
-            Ok(vortex_bytes)
-        })
+                    // FIXME(DK): surely a way to borrow the bytes from Python
+                    Ok::<_, PyErr>(Buffer::from_iter(slice.iter().map(|x| x.get())))
+                })?;
+
+                Ok(vortex_bytes)
+            }
+            .map_err(|err: PyErr| VortexError::generic(Box::new(err))),
+        )
     }
 
     fn size(&self) -> BoxFuture<'static, VortexResult<u64>> {
         let size = self.size.clone();
-        Box::pin(async move {
-            let fut = Python::attach(|py| {
-                let awaitable = size.call0(py).expect("ugh wtf").into_bound(py);
-                into_future(awaitable)
-            })
-            .expect("wat");
-            let size = fut.await.expect("ugh 2");
-            let size = Python::attach(|py| size.extract::<u64>(py)).expect("ugh 3");
-            Ok(size)
-        })
+        Box::pin(
+            async move {
+                let size = Python::attach(|py| {
+                    let awaitable = size.call0(py)?;
+                    into_future(awaitable.into_bound(py))
+                })?
+                .await?;
+                let size = Python::attach(|py| size.extract::<u64>(py))?;
+                Ok::<_, PyErr>(size)
+            }
+            .map_err(|err: PyErr| VortexError::generic(Box::new(err))),
+        )
     }
 }

@@ -1,9 +1,10 @@
 use std::sync::Arc;
 
+use bytes::Bytes;
 use futures::{TryFutureExt, future::BoxFuture};
 use numpy::PyArray;
 use pyo3::{
-    buffer::{Element, PyBuffer},
+    buffer::{Element, PyBuffer, ReadOnlyCell},
     exceptions::PyValueError,
     prelude::*,
 };
@@ -254,8 +255,10 @@ impl PyVortexCodec {
                 T::PTYPE
             ))
         })?;
-        // FIXME(DK): surely a way to borrow the bytes from Python
-        let vortex_bytes = Buffer::from_iter(slice.iter().map(|x| x.get()));
+        // SAFETY: ReadOnlyCell is transparent, UnsafeCell has the same memory
+        // layout. If Python mutates this concurrently, we're dead.
+        let slice: &[u8] = unsafe { std::mem::transmute(slice) };
+        let vortex_bytes = Buffer::from(Bytes::from_owner(slice));
         // TODO(DK): Can we get invalidity information from Zarr?
         let vortex_array = PrimitiveArray::new(vortex_bytes, Validity::AllValid);
 
@@ -339,8 +342,11 @@ impl VortexReadAt for JankVortexReadAt {
                         PyValueError::new_err("ByteGetter must return a c-contiguous byte buffer")
                     })?;
 
-                    // FIXME(DK): surely a way to borrow the bytes from Python
-                    Ok::<_, PyErr>(Buffer::from_iter(slice.iter().map(|x| x.get())))
+                    // SAFETY: ReadOnlyCell is transparent, UnsafeCell has the same memory
+                    // layout. If Python mutates this concurrently, we're dead.
+                    let slice: &[u8] = unsafe { std::mem::transmute(slice) };
+
+                    Ok::<_, PyErr>(Buffer::from(Bytes::from_owner(slice)))
                 })?;
 
                 Ok(vortex_bytes)
